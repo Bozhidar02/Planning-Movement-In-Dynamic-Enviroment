@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class StaticRectangle:
     def __init__(self, x, y, w, h):
         self.x = x

@@ -25,6 +25,8 @@ class InputHandler:
             self.sim.mode = "robot"
         elif key == pygame.K_4:
             self.sim.mode = "goal"
+        elif key == pygame.K_5:
+            self.sim.mode = "obstacle_goal"
         elif key == pygame.K_s:
             self.sim.running = True
         elif key == pygame.K_r:
@@ -38,10 +40,32 @@ class InputHandler:
             self.sim.env.static_obstacles.append(StaticObstacle(rect))
 
         elif self.sim.mode == "dynamic":
-            self.sim.env.dynamic_obstacles.append(DynamicObstacle((x, y)))
+            self.sim.env.dynamic_obstacles.append(DynamicObstacle((x, y), 15))
 
         elif self.sim.mode == "robot":
             self.sim.robot = Robot((x, y))
 
         elif self.sim.mode == "goal":
             self.sim.goal = np.array([x, y], dtype=float)
+
+        elif self.sim.mode == "obstacle_goal":
+
+            m_pos = np.array(pos, dtype=float)
+
+            # Step 1: try selecting an obstacle
+
+            for obs in self.sim.env.dynamic_obstacles:
+
+                if np.linalg.norm(obs.pos - m_pos) <= obs.radius:
+                    self.sim.selected_obstacle = obs
+
+                    print("Selected obstacle")
+
+                    return
+
+            #Assign goal if one is selected
+
+            if self.sim.selected_obstacle is not None:
+                self.sim.selected_obstacle.goal = m_pos
+                self.sim.selected_obstacle.path = []
+                self.sim.selected_obstacle.path_index = 0

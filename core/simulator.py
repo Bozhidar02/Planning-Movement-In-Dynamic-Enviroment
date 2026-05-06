@@ -10,6 +10,7 @@ class Simulator:
         self.goal = None
         self.mode = "static"
         self.running = False
+        self.selected_obstacle = None
 
     def _collides_with_static(self, pos, radius):
         for static in self.env.static_obstacles:
@@ -30,30 +31,35 @@ class Simulator:
         return False
 
     def _update_dynamic_obstacles(self):
+        grid, res = self._build_grid()
+
         for obs in self.env.dynamic_obstacles:
-            # Sub-stepping for dynamic obstacles to prevent tunneling
-            steps = 4
-            step_vel = obs.vel / steps
 
-            for _ in range(steps):
-                proposed = obs.pos + step_vel
+            # Recompute path if needed
+            if not hasattr(obs, "path") or not obs.path:
+                start = (int(obs.pos[0] // res), int(obs.pos[1] // res))
+                if obs.goal is None:
+                    continue
 
-                # Check collision at the proposed step
-                if self._collides_with_static(proposed, obs.radius) or \
-                        self._collides_with_dynamic(proposed, obs):
+                goal = (int(obs.goal[0] // res), int(obs.goal[1] // res))
 
-                    # COLLISION DETECTED:
-                    # 1. Reverse velocity
-                    obs.vel *= -1
-                    # 2. Stop moving for this frame to avoid getting stuck
-                    # inside the collision zone
-                    break
+                obs.path = self._astar_path(start, goal, grid, res)
+                obs.path_index = 0
+
+            # Follow path
+            if obs.path and obs.path_index < len(obs.path):
+                target_cell = obs.path[obs.path_index]
+                target = np.array(target_cell) * res
+
+                direction = target - obs.pos
+                dist = np.linalg.norm(direction)
+
+                if dist < 5:  # reached node
+                    obs.path_index += 1
                 else:
-                    # Path is clear, update position
-                    obs.pos = proposed
+                    obs.pos += (direction / max(dist, 1e-6)) * np.linalg.norm(obs.vel)
 
     def _update_robot(self):
-        print("Robo update: ")
         if self.robot is None or self.goal is None:
             return
 
@@ -70,23 +76,17 @@ class Simulator:
         while remaining > 0:
             step = min(step_size, remaining)
             proposed = self.robot.pos + direction * step
-            print("Proposed next position: ", proposed)
             # If the next tiny step hits something, we stop moving this frame
             if self._collides_with_static(proposed, self.robot.radius) or \
                     self._collides_with_dynamic(proposed, self.robot):
-                # Optimization: You could implement "sliding" here
-                # by projecting the direction onto the obstacle tangent.
                 break
 
             self.robot.pos = proposed
             remaining -= step
 
     def update(self):
-        print("Running simulator...")
         if not self.running:
-            print("Simulator not running yet")
             return
-        print("Updating everything")
         self._update_dynamic_obstacles()
         self._update_robot()
 
@@ -95,3 +95,70 @@ class Simulator:
         self.robot = None
         self.goal = None
         self.running = False
+
+    def _astar_path(self, start, goal, grid, grid_size):
+        import heapq
+
+        def heuristic(a, b):
+            return np.linalg.norm(np.array(a) - np.array(b))
+
+        def neighbors(node):
+            x, y = node
+            dirs = [(1, 0), (-1, 0), (0, 1), (0, -1),
+                    (1, 1), (1, -1), (-1, 1), (-1, -1)]
+            for dx, dy in dirs:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]:
+                    yield (nx, ny)
+
+        start = tuple(start)
+        goal = tuple(goal)
+
+        open_set = []
+        heapq.heappush(open_set, (0, start))
+
+        came_from = {}
+        g_score = {start: 0}
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+
+            if current == goal:
+                path = []
+                while current in came_from:
+                    path.append(current)
+                    current = came_from[current]
+                path.reverse()
+                return path
+
+            for n in neighbors(current):
+                if grid[n] == 1:  # blocked
+                    continue
+
+                tentative = g_score[current] + heuristic(current, n)
+
+                if n not in g_score or tentative < g_score[n]:
+                    came_from[n] = current
+                    g_score[n] = tentative
+                    f = tentative + heuristic(n, goal)
+                    heapq.heappush(open_set, (f, n))
+
+        return []
+
+    def _build_grid(self, resolution=10):
+        width, height = self.env.width, self.env.height
+
+        grid_w = int(width // resolution)
+        grid_h = int(height // resolution)
+
+        grid = np.zeros((grid_w, grid_h), dtype=int)
+
+        for obs in self.env.static_obstacles:
+            x0 = int(obs.rect.x // resolution)
+            y0 = int(obs.rect.y // resolution)
+            x1 = int((obs.rect.x + obs.rect.width) // resolution)
+            y1 = int((obs.rect.y + obs.rect.height) // resolution)
+
+            grid[x0:x1+1, y0:y1+1] = 1
+
+        return grid, resolution

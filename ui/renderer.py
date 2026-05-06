@@ -1,3 +1,4 @@
+import numpy as np
 import pygame
 from config import *
 
@@ -22,6 +23,12 @@ class Renderer:
                 obs.pos.astype(int),
                 obs.radius
             )
+            if obs.goal is not None:
+                pygame.draw.circle(self.screen, (0, 255, 0), obs.goal.astype(int), 5)
+            if hasattr(obs, "path") and obs.path:
+                for cell in obs.path:
+                    pos = (np.array(cell) * 10).astype(int)  # 10 = grid resolution
+                    pygame.draw.circle(self.screen, (0, 0, 255), pos, 3)
 
         # Robot
         if sim.robot:
@@ -38,7 +45,7 @@ class Renderer:
 
         # UI text
         text = self.font.render(
-            f"Mode: {sim.mode} | 1:Static 2:Dynamic 3:Robot 4:Goal | S:Start R:Reset",
+            f"Mode: {sim.mode} | 1:Static 2:Dynamic 3:Robot 4:Goal 5:Obstacle Goal | S:Start R:Reset",
             True,
             BLACK,
         )

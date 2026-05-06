@@ -1,5 +1,7 @@
 class Environment:
-    def __init__(self):
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
         self.static_obstacles = []
         self.dynamic_obstacles = []
 

@@ -1,150 +1,82 @@
 import pygame
-import sys
 import numpy as np
+import core.enviroment
+import core.simulator
+import entities.robot
+import ui.renderer
 
-# --- SETTINGS ---
+# --- Configuration (or import from config) ---
 WIDTH, HEIGHT = 800, 600
 FPS = 60
-GRID = 20
-
-pygame.init()
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Motion Planning Simulator")
-clock = pygame.time.Clock()
-
-font = pygame.font.SysFont(None, 24)
-
-# --- COLORS ---
-WHITE = (255, 255, 255)
-GRAY = (100, 100, 100)
-BLUE = (50, 100, 255)
-RED = (255, 50, 50)
-GREEN = (50, 255, 100)
-
-# --- DATA ---
-static_obstacles = []
-dynamic_obstacles = []
-robot = None
-goal = None
-
-mode = "static"
-running_sim = False
 
 
-# --- HELPERS ---
-def snap(pos):
-    x, y = pos
-    return (round(x / GRID) * GRID, round(y / GRID) * GRID)
-
-
-# --- CLASSES ---
-class Robot:
-    def __init__(self, pos):
-        self.pos = np.array(pos, dtype=float)
-        self.speed = 2
-
-    def update(self):
-        if goal is None:
-            return
-
-        direction = goal - self.pos
-        dist = np.linalg.norm(direction)
-
-        if dist > 1:
-            direction /= dist
-            self.pos += direction * self.speed
+class StaticObstacle:
+    def __init__(self, rect):
+        self.rect = pygame.Rect(rect)
 
 
 class DynamicObstacle:
-    def __init__(self, pos):
+    def __init__(self, pos, radius):
         self.pos = np.array(pos, dtype=float)
-        self.vel = np.array([2.0, 0])  # horizontal "car"
-
-    def update(self):
-        self.pos += self.vel
-
-        if self.pos[0] > WIDTH:
-            self.pos[0] = 0
-        if self.pos[0] < 0:
-            self.pos[0] = WIDTH
+        self.radius = radius
+        self.vel = np.array([2.0, 1.5])  # Initial velocity
 
 
-# --- MAIN LOOP ---
-while True:
-    screen.fill(WHITE)
+def main():
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    clock = pygame.time.Clock()
 
-    # --- EVENTS ---
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            sys.exit()
+    # 1. Initialize our components
+    env = core.enviroment.Environment()
+    sim = core.simulator.Simulator(env)
+    renderer = ui.renderer.Renderer(screen)
 
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_1:
-                mode = "static"
-            elif event.key == pygame.K_2:
-                mode = "dynamic"
-            elif event.key == pygame.K_3:
-                mode = "robot"
-            elif event.key == pygame.K_4:
-                mode = "goal"
-            elif event.key == pygame.K_s:
-                running_sim = True
-            elif event.key == pygame.K_r:
-                static_obstacles.clear()
-                dynamic_obstacles.clear()
-                robot = None
-                goal = None
-                running_sim = False
+    running_app = True
+    while running_app:
+        # 2. Event Handling
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running_app = False
 
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            x, y = snap(pygame.mouse.get_pos())
+            # Switch Modes
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_1: sim.mode = "static"
+                if event.key == pygame.K_2: sim.mode = "dynamic"
+                if event.key == pygame.K_3: sim.mode = "robot"
+                if event.key == pygame.K_4: sim.mode = "goal"
+                if event.key == pygame.K_s: sim.running = not sim.running  # Toggle Start/Stop
+                if event.key == pygame.K_r: sim.reset()
 
-            if mode == "static":
-                rect = pygame.Rect(x - 10, y - 10, 20, 20)
-                static_obstacles.append(rect)
+            # Add objects with Mouse
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                m_pos = pygame.mouse.get_pos()
 
-            elif mode == "dynamic":
-                dynamic_obstacles.append(DynamicObstacle((x, y)))
+                if sim.mode == "static":
+                    # Create a 50x50 block at mouse click
+                    new_rect = pygame.Rect(m_pos[0] - 25, m_pos[1] - 25, 50, 50)
+                    env.static_obstacles.append(StaticObstacle(new_rect))
 
-            elif mode == "robot":
-                robot = Robot((x, y))
+                elif sim.mode == "dynamic":
+                    env.dynamic_obstacles.append(DynamicObstacle(m_pos, 15))
 
-            elif mode == "goal":
-                goal = np.array([x, y], dtype=float)
+                elif sim.mode == "robot":
+                    sim.robot = entities.robot.Robot(m_pos)
 
-    # --- UPDATE ---
-    if running_sim:
-        if robot:
-            robot.update()
+                elif sim.mode == "goal":
+                    sim.goal = np.array(m_pos, dtype=float)
 
-        for obs in dynamic_obstacles:
-            obs.update()
+        # 3. CRITICAL: The Simulator Update
+        # This calls the collision-aware logic we wrote.
+        # DO NOT update robot.pos or obstacle.pos outside of this call.
+        sim.update()
 
-    # --- DRAW ---
-    # Static obstacles
-    for rect in static_obstacles:
-        pygame.draw.rect(screen, GRAY, rect)
+        # 4. Rendering
+        renderer.draw(sim)
+        clock.tick(FPS)
 
-    # Dynamic obstacles
-    for obs in dynamic_obstacles:
-        pygame.draw.circle(screen, RED, obs.pos.astype(int), 8)
+    pygame.quit()
 
-    # Robot
-    if robot:
-        pygame.draw.circle(screen, BLUE, robot.pos.astype(int), 10)
 
-    # Goal
-    if goal is not None:
-        pygame.draw.circle(screen, GREEN, goal.astype(int), 10)
-
-    # UI text
-    text = font.render(
-        f"Mode: {mode} | 1:Static 2:Dynamic 3:Robot 4:Goal | S:Start R:Reset",
-        True,
-        (0, 0, 0),
-    )
-    screen.blit(text, (10, 10))
-
-    pygame.display.flip()
-    clock.tick(FPS)
+if __name__ == "__main__":
+    main()

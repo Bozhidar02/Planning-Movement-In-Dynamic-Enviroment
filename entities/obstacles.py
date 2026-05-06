@@ -1,11 +1,11 @@
 import numpy as np
-import pygame
 from config import WIDTH
 
 
 class StaticObstacle:
     def __init__(self, rect):
         self.rect = rect
+        self.radius = 10
 
 
 class DynamicObstacle:

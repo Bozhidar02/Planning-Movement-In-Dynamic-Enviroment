@@ -16,11 +16,21 @@ class Renderer:
 
         # Dynamic obstacles
         for obs in sim.env.dynamic_obstacles:
-            pygame.draw.circle(self.screen, RED, obs.pos.astype(int), 8)
+            pygame.draw.circle(
+                self.screen,
+                RED,
+                obs.pos.astype(int),
+                obs.radius
+            )
 
         # Robot
         if sim.robot:
-            pygame.draw.circle(self.screen, BLUE, sim.robot.pos.astype(int), 10)
+            pygame.draw.circle(
+                self.screen,
+                BLUE,
+                sim.robot.pos.astype(int),
+                sim.robot.radius
+            )
 
         # Goal
         if sim.goal is not None:

@@ -3,8 +3,8 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button
 import numpy as np
 
-from obstacles import StaticRectangle, DynamicObstacle
-from robot import Robot
+from entities.obstacles import StaticRectangle, DynamicObstacle
+from entities.robot import Robot
 
 
 class Visualizer:

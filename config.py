@@ -1,0 +1,13 @@
+#Size
+WIDTH = 800
+HEIGHT = 600
+FPS = 60
+GRID_SIZE = 20
+
+# Colors
+WHITE = (255, 255, 255)
+GRAY = (100, 100, 100)
+BLUE = (50, 100, 255)
+RED = (255, 50, 50)
+GREEN = (50, 255, 100)
+BLACK = (0, 0, 0)

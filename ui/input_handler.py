@@ -8,13 +8,16 @@ from entities.obstacles import StaticObstacle, DynamicObstacle
 class InputHandler:
     def __init__(self, simulator):
         self.sim = simulator
+        self.dragging = False
 
     def handle_event(self, event):
         if event.type == pygame.KEYDOWN:
             self._handle_key(event.key)
-
         elif event.type == pygame.MOUSEBUTTONDOWN:
+            self.dragging = True
             self._handle_click(pygame.mouse.get_pos())
+        elif event.type == pygame.MOUSEBUTTONUP:
+            self.dragging = False
 
     def _handle_key(self, key):
         if key == pygame.K_1:
@@ -37,8 +40,14 @@ class InputHandler:
         m_pos = np.array(pos, dtype=float)
 
         if self.sim.mode == "static":
-            rect = pygame.Rect(x - 10, y - 10, 20, 20)
-            self.sim.env.static_obstacles.append(StaticObstacle(rect))
+            new_rect = pygame.Rect(x - 10, y - 10, 20, 20)
+
+            # Prevent overlapping duplicates while dragging
+            for obs in self.sim.env.static_obstacles:
+                if obs.rect.colliderect(new_rect):
+                    return
+
+            self.sim.env.static_obstacles.append(StaticObstacle(new_rect))
 
         elif self.sim.mode == "dynamic":
             self.sim.env.dynamic_obstacles.append(DynamicObstacle((x, y), 15))

@@ -114,12 +114,28 @@ class Simulator:
 
         def neighbors(node):
             x, y = node
-            dirs = [(1, 0), (-1, 0), (0, 1), (0, -1),
-                    (1, 1), (1, -1), (-1, 1), (-1, -1)]
+            dirs = [
+                (1, 0), (-1, 0),
+                (0, 1), (0, -1),
+                (1, 1), (1, -1),
+                (-1, 1), (-1, -1)
+            ]
             for dx, dy in dirs:
+
                 nx, ny = x + dx, y + dy
-                if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]:
-                    yield (nx, ny)
+
+                if not (0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]):
+                    continue
+
+                if grid[nx, ny] == 1:
+                    continue
+
+                # Prevent diagonal corner cutting
+                if dx != 0 and dy != 0:
+                    if grid[x + dx, y] == 1 or grid[x, y + dy] == 1:
+                        continue
+
+                yield nx, ny
 
         start = tuple(start)
         goal = tuple(goal)
@@ -155,7 +171,8 @@ class Simulator:
 
         return []
 
-    def _build_grid(self, resolution=10):
+    def _build_grid(self, resolution=10, inflation_radius=15):
+
         width, height = self.env.width, self.env.height
 
         grid_w = int(width // resolution)
@@ -163,12 +180,21 @@ class Simulator:
 
         grid = np.zeros((grid_w, grid_h), dtype=int)
 
-        for obs in self.env.static_obstacles:
-            x0 = int(obs.rect.x // resolution)
-            y0 = int(obs.rect.y // resolution)
-            x1 = int((obs.rect.x + obs.rect.width) // resolution)
-            y1 = int((obs.rect.y + obs.rect.height) // resolution)
+        inflation_cells = int(np.ceil(inflation_radius / resolution))
 
-            grid[x0:x1+1, y0:y1+1] = 1
+        for obs in self.env.static_obstacles:
+            x0 = int(obs.rect.x // resolution) - inflation_cells
+            y0 = int(obs.rect.y // resolution) - inflation_cells
+
+            x1 = int((obs.rect.x + obs.rect.width) // resolution) + inflation_cells
+            y1 = int((obs.rect.y + obs.rect.height) // resolution) + inflation_cells
+
+            x0 = max(0, x0)
+            y0 = max(0, y0)
+
+            x1 = min(grid_w - 1, x1)
+            y1 = min(grid_h - 1, y1)
+
+            grid[x0:x1 + 1, y0:y1 + 1] = 1
 
         return grid, resolution

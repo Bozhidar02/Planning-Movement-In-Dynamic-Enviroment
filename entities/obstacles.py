@@ -16,3 +16,8 @@ class DynamicObstacle:
         self.goal = None
         self.path = []
         self.path_index = 0
+
+
+class ObstacleGoal:
+    def __init__(self, pos):
+        self.pos = np.array(pos, dtype=float)

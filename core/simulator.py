@@ -41,7 +41,10 @@ class Simulator:
                 if obs.goal is None:
                     continue
 
-                goal = (int(obs.goal[0] // res), int(obs.goal[1] // res))
+                goal = (
+                    int(obs.goal.pos[0] // res),
+                    int(obs.goal.pos[1] // res)
+                )
 
                 obs.path = self._astar_path(start, goal, grid, res)
                 obs.path_index = 0
@@ -57,7 +60,14 @@ class Simulator:
                 if dist < 5:  # reached node
                     obs.path_index += 1
                 else:
-                    obs.pos += (direction / max(dist, 1e-6)) * np.linalg.norm(obs.vel)
+                    step = (direction / max(dist, 1e-6)) * np.linalg.norm(obs.vel)
+
+                    proposed = obs.pos + step
+
+                    if not self._collides_with_static(proposed, obs.radius):
+                        obs.pos = proposed
+                    else:
+                        obs.path = []
 
     def _update_robot(self):
         if self.robot is None or self.goal is None:

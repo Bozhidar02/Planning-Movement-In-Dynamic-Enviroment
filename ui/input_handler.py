@@ -34,6 +34,7 @@ class InputHandler:
 
     def _handle_click(self, pos):
         x, y = snap_to_grid(pos)
+        m_pos = np.array(pos, dtype=float)
 
         if self.sim.mode == "static":
             rect = pygame.Rect(x - 10, y - 10, 20, 20)
@@ -49,23 +50,26 @@ class InputHandler:
             self.sim.goal = np.array([x, y], dtype=float)
 
         elif self.sim.mode == "obstacle_goal":
-
-            m_pos = np.array(pos, dtype=float)
-
-            # Step 1: try selecting an obstacle
-
+            print("Click with new mode")
+            # STEP 1: Try selecting obstacle
             for obs in self.sim.env.dynamic_obstacles:
 
                 if np.linalg.norm(obs.pos - m_pos) <= obs.radius:
                     self.sim.selected_obstacle = obs
-
                     print("Selected obstacle")
-
                     return
 
-            #Assign goal if one is selected
-
+            # STEP 2: Place goal for selected obstacle
             if self.sim.selected_obstacle is not None:
-                self.sim.selected_obstacle.goal = m_pos
+                from entities.obstacles import ObstacleGoal
+
+                self.sim.selected_obstacle.goal = ObstacleGoal(m_pos)
+
+                # Force A* recompute
                 self.sim.selected_obstacle.path = []
                 self.sim.selected_obstacle.path_index = 0
+
+                print("Placed obstacle goal")
+
+                # Optional: deselect after placing
+                self.sim.selected_obstacle = None

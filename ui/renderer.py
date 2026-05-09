@@ -23,8 +23,21 @@ class Renderer:
                 obs.pos.astype(int),
                 obs.radius
             )
+            if obs is sim.selected_obstacle:
+                pygame.draw.circle(
+                    self.screen,
+                    (255, 255, 0),
+                    obs.pos.astype(int),
+                    obs.radius + 4,
+                    2
+                )
             if obs.goal is not None:
-                pygame.draw.circle(self.screen, (0, 255, 0), obs.goal.astype(int), 5)
+                pygame.draw.circle(
+                    self.screen,
+                    (0, 255, 0),
+                    obs.goal.pos.astype(int),
+                    6
+                )
             if hasattr(obs, "path") and obs.path:
                 for cell in obs.path:
                     pos = (np.array(cell) * 10).astype(int)  # 10 = grid resolution

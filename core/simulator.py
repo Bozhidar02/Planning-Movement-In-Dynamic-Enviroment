@@ -70,29 +70,24 @@ class Simulator:
                         obs.path = []
 
     def _update_robot(self):
+
         if self.robot is None or self.goal is None:
             return
 
-        direction = self.goal - self.robot.pos
-        dist = np.linalg.norm(direction)
+        self._sense_obstacles()
 
-        if dist < 1e-6:
-            return
+        direction = self._compute_navigation_vector()
 
-        direction = direction / dist
-        remaining = self.robot.speed
-        step_size = 0.1  # Smaller steps increase precision
+        proposed = (
+                self.robot.pos
+                + direction * self.robot.speed
+        )
 
-        while remaining > 0:
-            step = min(step_size, remaining)
-            proposed = self.robot.pos + direction * step
-            # If the next tiny step hits something, we stop moving this frame
-            if self._collides_with_static(proposed, self.robot.radius) or \
-                    self._collides_with_dynamic(proposed, self.robot):
-                break
-
+        if not self._collides_with_static(
+                proposed,
+                self.robot.radius
+        ):
             self.robot.pos = proposed
-            remaining -= step
 
     def update(self):
         if not self.running:
@@ -198,3 +193,108 @@ class Simulator:
             grid[x0:x1 + 1, y0:y1 + 1] = 1
 
         return grid, resolution
+
+    def _sense_obstacles(self):
+
+        robot = self.robot
+
+        if robot is None:
+            return
+
+        robot.lidar_data = []
+
+        angles = np.linspace(
+            0,
+            2 * np.pi,
+            robot.lidar_rays,
+            endpoint=False
+        )
+
+        for angle in angles:
+
+            direction = np.array([
+                np.cos(angle),
+                np.sin(angle)
+            ])
+
+            hit_point = robot.pos + direction * robot.lidar_range
+            min_dist = robot.lidar_range
+
+            # Ray marching
+            for d in np.linspace(0, robot.lidar_range, 100):
+
+                point = robot.pos + direction * d
+
+                collided = False
+
+                # Static obstacles
+                for obs in self.env.static_obstacles:
+
+                    rect = (
+                        obs.rect.x,
+                        obs.rect.y,
+                        obs.rect.width,
+                        obs.rect.height
+                    )
+
+                    if circle_rect_collision(point, 1, rect):
+                        min_dist = d
+                        hit_point = point
+                        collided = True
+                        break
+
+                if collided:
+                    break
+
+            robot.lidar_data.append(
+                (angle, min_dist, hit_point)
+            )
+
+    def _compute_navigation_vector(self):
+
+        robot = self.robot
+
+        if robot is None or self.goal is None:
+            return np.zeros(2)
+
+        # -----------------------------
+        # GOAL ATTRACTION
+        # -----------------------------
+        goal_vector = self.goal - robot.pos
+
+        goal_dist = np.linalg.norm(goal_vector)
+
+        if goal_dist > 1e-6:
+            goal_vector /= goal_dist
+
+        # -----------------------------
+        # OBSTACLE REPULSION
+        # -----------------------------
+        avoidance = np.zeros(2)
+
+        for angle, dist, _ in robot.lidar_data:
+
+            if dist < robot.lidar_range:
+                strength = (
+                        (robot.lidar_range - dist)
+                        / robot.lidar_range
+                )
+
+                direction = np.array([
+                    np.cos(angle),
+                    np.sin(angle)
+                ])
+
+                avoidance -= direction * strength
+
+        # -----------------------------
+        # COMBINE
+        # -----------------------------
+        final = goal_vector + avoidance * 2.0
+
+        mag = np.linalg.norm(final)
+
+        if mag > 1e-6:
+            final /= mag
+
+        return final

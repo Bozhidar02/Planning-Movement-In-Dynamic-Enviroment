@@ -45,6 +45,21 @@ class Renderer:
 
         # Robot
         if sim.robot:
+            for _, _, hit in sim.robot.lidar_data:
+                pygame.draw.line(
+                    self.screen,
+                    (0, 255, 255),
+                    sim.robot.pos.astype(int),
+                    hit.astype(int),
+                    1
+                )
+
+                pygame.draw.circle(
+                    self.screen,
+                    (255, 255, 0),
+                    hit.astype(int),
+                    2
+                )
             pygame.draw.circle(
                 self.screen,
                 BLUE,

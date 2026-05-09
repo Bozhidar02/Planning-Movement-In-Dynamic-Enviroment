@@ -243,6 +243,15 @@ class Simulator:
                         collided = True
                         break
 
+                # Dynamic obstacles
+                for obs in self.env.dynamic_obstacles:
+
+                    if np.linalg.norm(point - obs.pos) <= obs.radius:
+                        min_dist = d
+                        hit_point = point
+                        collided = True
+                        break
+
                 if collided:
                     break
 
@@ -272,13 +281,13 @@ class Simulator:
         # -----------------------------
         avoidance = np.zeros(2)
 
+        # Temporary variable for testing
+        influence = 25
+        # -----------------------------
         for angle, dist, _ in robot.lidar_data:
 
-            if dist < robot.lidar_range:
-                strength = (
-                        (robot.lidar_range - dist)
-                        / robot.lidar_range
-                )
+            if dist < influence:
+                strength = ((influence - dist) / influence) ** 2
 
                 direction = np.array([
                     np.cos(angle),
@@ -290,7 +299,7 @@ class Simulator:
         # -----------------------------
         # COMBINE
         # -----------------------------
-        final = goal_vector + avoidance * 2.0
+        final = goal_vector * 1.5 + avoidance
 
         mag = np.linalg.norm(final)
 

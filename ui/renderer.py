@@ -66,6 +66,21 @@ class Renderer:
                 sim.robot.pos.astype(int),
                 sim.robot.radius
             )
+            heading_end = (
+                sim.robot.pos
+                + np.array([
+                    np.cos(sim.robot.heading),
+                    np.sin(sim.robot.heading)
+                ]) * 20
+            )
+
+            pygame.draw.line(
+                self.screen,
+                (255, 255, 255),
+                sim.robot.pos.astype(int),
+                heading_end.astype(int),
+                2
+            )
 
         # Goal
         if sim.goal is not None:

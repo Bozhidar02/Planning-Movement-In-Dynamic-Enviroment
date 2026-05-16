@@ -70,24 +70,43 @@ class Simulator:
                         obs.path = []
 
     def _update_robot(self):
-
         if self.robot is None or self.goal is None:
             return
 
         self._sense_obstacles()
+        self._detect_stuck()
 
-        direction = self._compute_navigation_vector()
+        robot = self.robot
 
-        proposed = (
-                self.robot.pos
-                + direction * self.robot.speed
-        )
+        # --- MODE SWITCHING ---
+        if robot.mode == "navigate":
+            if self.robot.stuck:
+                # Switch to wall following, pick a follow direction
+                robot.mode = "wall_follow"
+                robot.wall_follow_dir = 1  # try left-hand first
+                robot.wall_follow_steps = 0
+                robot.stuck = False
 
-        if not self._collides_with_static(
-                proposed,
-                self.robot.radius
-        ):
-            self.robot.pos = proposed
+            direction = self._choose_best_direction()
+
+        elif robot.mode == "wall_follow":
+            robot.wall_follow_steps += 1
+
+            # Exit wall follow if goal is clear again or timeout
+            if self._goal_is_reachable() or \
+                    robot.wall_follow_steps > robot.max_wall_follow_steps:
+                robot.mode = "navigate"
+                robot.waypoints = []
+
+            direction = self._wall_follow_direction()
+
+        if np.linalg.norm(direction) < 1e-6:
+            return
+
+        proposed = robot.pos + direction * robot.speed
+
+        if not self._trajectory_collision(proposed, robot.radius):
+            robot.pos = proposed
 
     def update(self):
         if not self.running:
@@ -297,6 +316,38 @@ class Simulator:
                 avoidance -= direction * strength
 
         # -----------------------------
+        # STUCK ESCAPE
+        # -----------------------------
+        if robot.stuck:
+
+            tangent = np.zeros(2)
+
+            for angle, dist, _ in robot.lidar_data:
+
+                influence = 60
+
+                if dist < influence:
+                    direction = np.array([
+                        np.cos(angle),
+                        np.sin(angle)
+                    ])
+
+                    # Perpendicular vector
+                    perp = np.array([
+                        -direction[1],
+                        direction[0]
+                    ])
+
+                    strength = (
+                            (influence - dist)
+                            / influence
+                    )
+
+                    tangent += perp * strength
+
+            avoidance += tangent * 1.5
+
+        # -----------------------------
         # COMBINE
         # -----------------------------
         final = goal_vector * 1.5 + avoidance
@@ -307,3 +358,197 @@ class Simulator:
             final /= mag
 
         return final
+
+    def _trajectory_collision(self, pos, radius):
+
+        # Static obstacles
+        if self._collides_with_static(pos, radius):
+            return True
+
+        # Dynamic obstacles
+        for obs in self.env.dynamic_obstacles:
+
+            if np.linalg.norm(pos - obs.pos) <= (radius + obs.radius):
+                return True
+
+        return False
+
+    def _choose_best_direction(self):
+
+        if self.robot is None or self.goal is None:
+            return np.zeros(2)
+
+        best_score = -1e9
+        best_direction = None
+        best_heading = self.robot.heading
+
+        # Goal direction
+        goal_vector = self.goal - self.robot.pos
+
+        goal_dist = np.linalg.norm(goal_vector)
+
+        if goal_dist < 1e-6:
+            return np.zeros(2)
+
+        goal_direction = goal_vector / goal_dist
+
+        # Candidate steering angles
+        angles = np.linspace(
+            -self.robot.max_turn_rate,
+            self.robot.max_turn_rate,
+            self.robot.candidate_angles
+        )
+
+        for delta in angles:
+
+            candidate_heading = (
+                    self.robot.heading + delta
+            )
+
+            direction = np.array([
+                np.cos(candidate_heading),
+                np.sin(candidate_heading)
+            ])
+
+            simulated_pos = self.robot.pos.copy()
+
+            collision = False
+
+            # Simulate future motion
+            for _ in range(self.robot.prediction_time):
+
+                simulated_pos += (
+                        direction * self.robot.speed
+                )
+
+                if self._trajectory_collision(
+                        simulated_pos,
+                        self.robot.radius
+                ):
+                    collision = True
+                    break
+
+            # Reject collisions immediately
+            if collision:
+                continue
+
+            # -------------------------
+            # SCORE COMPONENTS
+            # -------------------------
+
+            # 1. Goal alignment
+            alignment = np.dot(
+                direction,
+                goal_direction
+            )
+
+            # 2. Goal progress
+            final_goal_dist = np.linalg.norm(
+                self.goal - simulated_pos
+            )
+
+            progress = -final_goal_dist
+
+            # 3. Turning penalty
+            smoothness = -abs(delta)
+
+            # 4. Obstacle clearance from lidar
+            clearance = 0.0
+            for angle, dist, _ in self.robot.lidar_data:
+                ray_dir = np.array([np.cos(angle), np.sin(angle)])
+                alignment_to_ray = np.dot(direction, ray_dir)
+                if alignment_to_ray > 0.5:  # ray roughly ahead in this direction
+                    clearance -= (1.0 / max(dist, 1.0)) * alignment_to_ray
+
+            # -------------------------
+            # FINAL SCORE
+            # -------------------------
+            score = (
+                    alignment * 200
+                    + progress * 1.5
+                    + smoothness * 10
+                    + clearance * 300  # penalise directions toward lidar hits
+                    + (500 if self.robot.stuck else 0) * (1 - abs(delta) / self.robot.max_turn_rate) # reward turning when stuck
+            )
+
+            if score > best_score:
+                best_score = score
+                best_direction = direction
+                best_heading = candidate_heading
+
+        # No safe direction found
+        if best_direction is None:
+            return np.zeros(2)
+
+        self.robot.heading = best_heading
+
+        return best_direction
+
+    def _detect_stuck(self, window=40, threshold=5.0):
+        robot = self.robot
+        robot._pos_history.append(robot.pos.copy())
+
+        if len(robot._pos_history) > window:
+            robot._pos_history.pop(0)
+
+        if len(robot._pos_history) == window:
+            displacement = np.linalg.norm(
+                robot._pos_history[-1] - robot._pos_history[0]
+            )
+            robot.stuck = displacement < threshold
+        else:
+            robot.stuck = False
+
+    def _goal_is_reachable(self, clearance_threshold=40.0):
+        if self.robot is None or self.goal is None:
+            return False
+
+        goal_dir = self.goal - self.robot.pos
+        goal_angle = np.arctan2(goal_dir[1], goal_dir[0])
+
+        for angle, dist, _ in self.robot.lidar_data:
+            angular_diff = abs((angle - goal_angle + np.pi) % (2 * np.pi) - np.pi)
+            if angular_diff < 0.3:  # rays roughly toward goal
+                if dist < clearance_threshold:
+                    return False  # something is blocking
+
+        return True
+
+    def _wall_follow_direction(self):
+        robot = self.robot
+        best_dir = None
+        best_score = -1e9
+
+        for delta in np.linspace(-np.pi, np.pi, robot.candidate_angles):
+            candidate_heading = robot.heading + delta
+            direction = np.array([
+                np.cos(candidate_heading),
+                np.sin(candidate_heading)
+            ])
+
+            # Must not collide immediately
+            proposed = robot.pos + direction * robot.speed
+            if self._trajectory_collision(proposed, robot.radius):
+                continue
+
+            # Score: prefer directions perpendicular to wall
+            # and biased by wall_follow_dir (left or right hand)
+            perpendicular_score = robot.wall_follow_dir * np.cross(
+                np.array([np.cos(robot.heading), np.sin(robot.heading)]),
+                direction
+            )
+
+            # Prefer staying close to wall (not drifting away)
+            wall_proximity = 0.0
+            for angle, dist, _ in robot.lidar_data:
+                if dist < 60:
+                    wall_proximity += 1.0 / max(dist, 1.0)
+
+            score = perpendicular_score * 100 + wall_proximity * 10
+
+            if score > best_score:
+                best_score = score
+                best_dir = direction
+                robot.heading = candidate_heading
+
+        return best_dir if best_dir is not None else np.zeros(2)

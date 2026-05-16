@@ -21,6 +21,6 @@ def circle_rect_collision(circle_pos, radius, rect):
     hit = dist_sq < (radius ** 2)
 
     # DEBUG LOG
-    if hit: print(f"HIT! Dist Sq: {dist_sq} | Rad Sq: {radius**2}")
+    #if hit: print(f"HIT! Dist Sq: {dist_sq} | Rad Sq: {radius**2}")
 
     return hit

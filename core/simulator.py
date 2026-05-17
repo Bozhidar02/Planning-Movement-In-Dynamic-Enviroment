@@ -65,7 +65,9 @@ class Simulator:
                     proposed = obs.pos + step
 
                     if not self._collides_with_static(proposed, obs.radius):
+                        old_pos = obs.pos.copy()
                         obs.pos = proposed
+                        obs.vel = obs.pos - old_pos
                     else:
                         obs.path = []
 
@@ -86,6 +88,26 @@ class Simulator:
                 robot.wall_follow_steps = 0
                 robot.stuck = False
                 robot._pos_history.clear()
+
+            wait, back_up, backup_direction = self._assess_dynamic_threats()
+
+            if back_up or wait:
+                # Increment stall counter
+                robot.dynamic_wait_steps = getattr(robot, 'dynamic_wait_steps', 0) + 1
+
+                if robot.dynamic_wait_steps > 60:  # ~1 second at 60fps — tune this
+                    self._circle_back()
+                    return
+
+                if back_up:
+                    backup_direction /= np.linalg.norm(backup_direction)
+                    proposed = robot.pos + backup_direction * robot.speed
+                    if not self._trajectory_collision(proposed, robot.radius):
+                        robot.pos = proposed
+                return  # wait: stand still
+
+            else:
+                robot.dynamic_wait_steps = 0  # clear counter when path is free
 
             direction = self._choose_best_direction()
             if np.linalg.norm(direction) < 1e-6:
@@ -377,19 +399,103 @@ class Simulator:
 
         return final
 
-    def _trajectory_collision(self, pos, radius):
-
-        # Static obstacles
+    def _trajectory_collision(self, pos, radius, lookahead=10):
         if self._collides_with_static(pos, radius):
             return True
 
-        # Dynamic obstacles
         for obs in self.env.dynamic_obstacles:
-
-            if np.linalg.norm(pos - obs.pos) <= (radius + obs.radius):
-                return True
+            for t in range(lookahead):
+                # Predict where obstacle will be t frames ahead
+                predicted_pos = obs.pos + obs.vel * t
+                if np.linalg.norm(pos - predicted_pos) <= (radius + obs.radius):
+                    return True
 
         return False
+
+    def _assess_dynamic_threats(self):
+        robot = self.robot
+        robot_speed = robot.speed
+
+        wait = False
+        back_up = False
+        backup_direction = np.zeros(2)
+        threat_found = False
+
+        for obs in self.env.dynamic_obstacles:
+            rel_pos = obs.pos - robot.pos
+            dist = np.linalg.norm(rel_pos)
+            obs_speed = np.linalg.norm(obs.vel)
+
+            if dist > robot.lidar_range * 0.6:
+                continue
+
+            threat_frames = None
+            for t in range(1, 30):
+                predicted = obs.pos + obs.vel * t
+                if np.linalg.norm(predicted - robot.pos) <= (robot.radius + obs.radius + 5):
+                    threat_frames = t
+                    break
+
+            if threat_frames is None:
+                continue
+
+            threat_found = True
+
+            if obs_speed > robot_speed:
+                if dist < (robot.radius + obs.radius) * 3:
+                    back_up = True
+                    backup_direction -= (rel_pos / max(dist, 1e-6))
+                else:
+                    wait = True
+
+        # Reset wait counter if no threat
+        if not threat_found:
+            robot.dynamic_wait_steps = 0
+
+        return wait, back_up, backup_direction
+
+    def _circle_back(self):
+        """Find a perpendicular path around the blocking dynamic obstacle."""
+        robot = self.robot
+
+        # Find the closest threatening obstacle
+        closest_obs = None
+        closest_dist = float('inf')
+        for obs in self.env.dynamic_obstacles:
+            dist = np.linalg.norm(obs.pos - robot.pos)
+            if dist < closest_dist and dist < robot.lidar_range * 0.6:
+                closest_dist = dist
+                closest_obs = obs
+
+        if closest_obs is None:
+            robot.dynamic_wait_steps = 0
+            robot.mode = "navigate"
+            return
+
+        # Vector toward obstacle
+        to_obs = closest_obs.pos - robot.pos
+        to_obs_norm = to_obs / max(np.linalg.norm(to_obs), 1e-6)
+
+        # Try both perpendicular directions, pick the one closer to goal
+        perp_a = np.array([-to_obs_norm[1], to_obs_norm[0]])
+        perp_b = np.array([to_obs_norm[1], -to_obs_norm[0]])
+
+        goal_dir = self.goal - robot.pos
+        goal_dir /= max(np.linalg.norm(goal_dir), 1e-6)
+
+        # Pick whichever perpendicular aligns better with goal
+        direction = perp_a if np.dot(perp_a, goal_dir) >= np.dot(perp_b, goal_dir) else perp_b
+
+        proposed = robot.pos + direction * robot.speed
+        if not self._trajectory_collision(proposed, robot.radius):
+            robot.pos = proposed
+        else:
+            # Blocked that way too — try the other perpendicular
+            direction = perp_b if direction is perp_a else perp_a
+            proposed = robot.pos + direction * robot.speed
+            if not self._trajectory_collision(proposed, robot.radius):
+                robot.pos = proposed
+            # If both blocked, do nothing this frame — next frame may clear
 
     def _choose_best_direction(self):
 

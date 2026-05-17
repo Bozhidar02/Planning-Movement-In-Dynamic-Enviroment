@@ -23,3 +23,4 @@ class Robot:
         self.wall_follow_dir = 1  # 1 = left-hand rule, -1 = right-hand rule
         self.wall_follow_steps = 0
         self.max_wall_follow_steps = 300  # safety exit
+        self.dynamic_wait_steps = 10

@@ -1,5 +1,5 @@
 import numpy as np
-
+import heapq
 from utils.collision import circle_circle_collision, circle_rect_collision
 
 
@@ -11,13 +11,22 @@ class Simulator:
         self.mode = "static"
         self.running = False
         self.selected_obstacle = None
+        self._cached_grid = None
+        self._cached_grid_res = None
+        self._predicted_obs = []
+        self._cached_dynamic_grid  = None
 
     def _collides_with_static(self, pos, radius):
-        for static in self.env.static_obstacles:
-            rect = (static.rect.x, static.rect.y,
-                    static.rect.width, static.rect.height)
-
-            if circle_rect_collision(pos, radius, rect):
+        px, py = pos
+        r2 = radius * radius
+        for obs in self.env.static_obstacles:
+            ox = obs.rect.x;
+            oy = obs.rect.y
+            cx = ox if px < ox else (ox + obs.rect.width if px > ox + obs.rect.width else px)
+            cy = oy if py < oy else (oy + obs.rect.height if py > oy + obs.rect.height else py)
+            dx = px - cx;
+            dy = py - cy
+            if dx * dx + dy * dy < r2:
                 return True
         return False
 
@@ -31,45 +40,45 @@ class Simulator:
         return False
 
     def _update_dynamic_obstacles(self):
-        grid, res = self._build_grid()
+        grid, res = self._build_dynamic_grid()
 
         for obs in self.env.dynamic_obstacles:
+            # Cooldown so failed A* doesn't retry every frame
+            if not hasattr(obs, 'path_retry_cooldown'):
+                obs.path_retry_cooldown = 0
+            if obs.path_retry_cooldown > 0:
+                obs.path_retry_cooldown -= 1
+                continue
 
-            # Recompute path if needed
             if not hasattr(obs, "path") or not obs.path:
-                start = (int(obs.pos[0] // res), int(obs.pos[1] // res))
                 if obs.goal is None:
                     continue
-
-                goal = (
-                    int(obs.goal.pos[0] // res),
-                    int(obs.goal.pos[1] // res)
-                )
-
+                start = (int(obs.pos[0] // res), int(obs.pos[1] // res))
+                goal = (int(obs.goal.pos[0] // res), int(obs.goal.pos[1] // res))
                 obs.path = self._astar_path(start, goal, grid, res)
                 obs.path_index = 0
+                if not obs.path:
+                    obs.path_retry_cooldown = 30
+                    continue
 
-            # Follow path
             if obs.path and obs.path_index < len(obs.path):
-                target_cell = obs.path[obs.path_index]
-                target = np.array(target_cell) * res
+                target = np.array(obs.path[obs.path_index]) * res
+                diff = target - obs.pos
+                dist = np.hypot(diff[0], diff[1])  # faster than linalg.norm for 2D
 
-                direction = target - obs.pos
-                dist = np.linalg.norm(direction)
-
-                if dist < 5:  # reached node
+                if dist < 5:
                     obs.path_index += 1
                 else:
-                    step = (direction / max(dist, 1e-6)) * np.linalg.norm(obs.vel)
-
+                    speed = np.hypot(obs.vel[0], obs.vel[1])
+                    step = (diff / max(dist, 1e-6)) * speed
                     proposed = obs.pos + step
 
                     if not self._collides_with_static(proposed, obs.radius):
-                        old_pos = obs.pos.copy()
+                        obs.vel = step  # already the delta, no copy needed
                         obs.pos = proposed
-                        obs.vel = obs.pos - old_pos
                     else:
                         obs.path = []
+                        obs.path_retry_cooldown = 10
 
     def _update_robot(self):
         if self.robot is None or self.goal is None:
@@ -77,6 +86,7 @@ class Simulator:
 
         self._sense_obstacles()
         self._detect_stuck()
+        self._precompute_predictions()
 
         robot = self.robot
         direction = np.zeros(2)
@@ -159,12 +169,16 @@ class Simulator:
         self.robot = None
         self.goal = None
         self.running = False
+        self._cached_grid = None
+        self._cached_grid_res = None
+        self._cached_dynamic_grid = None
 
     def _astar_path(self, start, goal, grid, grid_size):
-        import heapq
 
         def heuristic(a, b):
-            return np.linalg.norm(np.array(a) - np.array(b))
+            dx = a[0] - b[0]
+            dy = a[1] - b[1]
+            return (dx * dx + dy * dy) ** 0.5
 
         def neighbors(node):
             x, y = node
@@ -225,98 +239,131 @@ class Simulator:
 
         return []
 
-    def _build_grid(self, resolution=10, inflation_radius=15):
+    def _build_grid(self, resolution=10, inflation_radius=10):
+        if self._cached_grid is not None:
+            return self._cached_grid, self._cached_grid_res
+
+        # Default inflation = just enough to keep dynamic obs centre
+        # away from walls — use their radius, not the robot's
+        if inflation_radius is None:
+            inflation_radius = resolution  # 1 cell minimum clearance
 
         width, height = self.env.width, self.env.height
-
         grid_w = int(width // resolution)
         grid_h = int(height // resolution)
-
         grid = np.zeros((grid_w, grid_h), dtype=int)
 
-        inflation_cells = int(np.ceil(inflation_radius / resolution))
+        inflation_cells = max(1, int(np.ceil(inflation_radius / resolution)))
 
         for obs in self.env.static_obstacles:
-            x0 = int(obs.rect.x // resolution) - inflation_cells
-            y0 = int(obs.rect.y // resolution) - inflation_cells
-
-            x1 = int((obs.rect.x + obs.rect.width) // resolution) + inflation_cells
-            y1 = int((obs.rect.y + obs.rect.height) // resolution) + inflation_cells
-
-            x0 = max(0, x0)
-            y0 = max(0, y0)
-
-            x1 = min(grid_w - 1, x1)
-            y1 = min(grid_h - 1, y1)
-
+            x0 = max(0, int(obs.rect.x // resolution) - inflation_cells)
+            y0 = max(0, int(obs.rect.y // resolution) - inflation_cells)
+            x1 = min(grid_w - 1, int((obs.rect.x + obs.rect.width) // resolution) + inflation_cells)
+            y1 = min(grid_h - 1, int((obs.rect.y + obs.rect.height) // resolution) + inflation_cells)
             grid[x0:x1 + 1, y0:y1 + 1] = 1
 
+        self._cached_grid = grid
+        self._cached_grid_res = resolution
+        return grid, resolution
+
+    def _build_dynamic_grid(self, resolution=10):
+        """Separate grid for dynamic obstacle pathfinding with smaller inflation."""
+        if hasattr(self, '_cached_dynamic_grid') and self._cached_dynamic_grid is not None:
+            return self._cached_dynamic_grid, self._cached_dynamic_grid_res
+
+        # Use the smallest dynamic obstacle radius as inflation
+        if self.env.dynamic_obstacles:
+            min_radius = min(obs.radius for obs in self.env.dynamic_obstacles)
+            inflation_radius = max(resolution, int(min_radius * 0.5))  # half radius clearance
+        else:
+            inflation_radius = resolution
+
+        width, height = self.env.width, self.env.height
+        grid_w = int(width // resolution)
+        grid_h = int(height // resolution)
+        grid = np.zeros((grid_w, grid_h), dtype=int)
+        inflation_cells = max(1, int(np.ceil(inflation_radius / resolution)))
+
+        for obs in self.env.static_obstacles:
+            x0 = max(0, int(obs.rect.x // resolution) - inflation_cells)
+            y0 = max(0, int(obs.rect.y // resolution) - inflation_cells)
+            x1 = min(grid_w - 1, int((obs.rect.x + obs.rect.width) // resolution) + inflation_cells)
+            y1 = min(grid_h - 1, int((obs.rect.y + obs.rect.height) // resolution) + inflation_cells)
+            grid[x0:x1 + 1, y0:y1 + 1] = 1
+
+        self._cached_dynamic_grid = grid
+        self._cached_dynamic_grid_res = resolution
         return grid, resolution
 
     def _sense_obstacles(self):
-
         robot = self.robot
-
         if robot is None:
             return
 
+        angles = np.linspace(0, 2 * np.pi, robot.lidar_rays, endpoint=False)
+        cos_a = np.cos(angles)
+        sin_a = np.sin(angles)
+        rx, ry = robot.pos
+        lr = robot.lidar_range
+        steps = np.linspace(0, lr, 60)  # reduced from 100 — 60 is plenty
+
+        # Pre-filter: only obstacles within lidar range (avoid checking distant ones)
+        nearby_static = [
+            (obs.rect.x, obs.rect.y, obs.rect.width, obs.rect.height)
+            for obs in self.env.static_obstacles
+            if abs(obs.rect.x + obs.rect.width / 2 - rx) - obs.rect.width / 2 < lr
+               and abs(obs.rect.y + obs.rect.height / 2 - ry) - obs.rect.height / 2 < lr
+        ]
+        nearby_dynamic = [
+            (obs.pos, obs.radius)
+            for obs in self.env.dynamic_obstacles
+            if (obs.pos[0] - rx) ** 2 + (obs.pos[1] - ry) ** 2 < (lr + obs.radius) ** 2
+        ]
+
         robot.lidar_data = []
 
-        angles = np.linspace(
-            0,
-            2 * np.pi,
-            robot.lidar_rays,
-            endpoint=False
-        )
+        for i in range(len(angles)):
+            dx = cos_a[i]
+            dy = sin_a[i]
+            min_dist = lr
+            hit_x = rx + dx * lr
+            hit_y = ry + dy * lr
 
-        for angle in angles:
-
-            direction = np.array([
-                np.cos(angle),
-                np.sin(angle)
-            ])
-
-            hit_point = robot.pos + direction * robot.lidar_range
-            min_dist = robot.lidar_range
-
-            # Ray marching
-            for d in np.linspace(0, robot.lidar_range, 100):
-
-                point = robot.pos + direction * d
-
-                collided = False
-
-                # Static obstacles
-                for obs in self.env.static_obstacles:
-
-                    rect = (
-                        obs.rect.x,
-                        obs.rect.y,
-                        obs.rect.width,
-                        obs.rect.height
-                    )
-
-                    if circle_rect_collision(point, 1, rect):
-                        min_dist = d
-                        hit_point = point
-                        collided = True
-                        break
-
-                # Dynamic obstacles
-                for obs in self.env.dynamic_obstacles:
-
-                    if np.linalg.norm(point - obs.pos) <= obs.radius:
-                        min_dist = d
-                        hit_point = point
-                        collided = True
-                        break
-
-                if collided:
+            for d in steps:
+                if d >= min_dist:
                     break
 
-            robot.lidar_data.append(
-                (angle, min_dist, hit_point)
-            )
+                px = rx + dx * d
+                py = ry + dy * d
+
+                hit = False
+
+                for rect in nearby_static:
+                    ox, oy, ow, oh = rect
+                    cx = max(ox, min(px, ox + ow))
+                    cy = max(oy, min(py, oy + oh))
+                    ex = px - cx
+                    ey = py - cy
+                    if ex * ex + ey * ey < 1:
+                        min_dist = d
+                        hit_x, hit_y = px, py
+                        hit = True
+                        break
+
+                if not hit:
+                    for obs_pos, obs_rad in nearby_dynamic:
+                        ex = px - obs_pos[0]
+                        ey = py - obs_pos[1]
+                        if ex * ex + ey * ey <= obs_rad * obs_rad:
+                            min_dist = d
+                            hit_x, hit_y = px, py
+                            hit = True
+                            break
+
+                if hit:
+                    break
+
+            robot.lidar_data.append((angles[i], min_dist, np.array([hit_x, hit_y])))
 
     def _compute_navigation_vector(self):
 
@@ -399,17 +446,25 @@ class Simulator:
 
         return final
 
-    def _trajectory_collision(self, pos, radius, lookahead=10):
+    def _precompute_predictions(self, lookahead=10):
+        # Call once per frame before choose_best_direction
+        self._predicted_obs = []
+        for obs in self.env.dynamic_obstacles:
+            positions = [obs.pos + obs.vel * t for t in range(lookahead)]
+            self._predicted_obs.append((positions, obs.radius))
+
+    def _trajectory_collision(self, pos, radius):
         if self._collides_with_static(pos, radius):
             return True
 
-        for obs in self.env.dynamic_obstacles:
-            for t in range(lookahead):
-                # Predict where obstacle will be t frames ahead
-                predicted_pos = obs.pos + obs.vel * t
-                if np.linalg.norm(pos - predicted_pos) <= (radius + obs.radius):
+        px, py = pos
+        for positions, obs_radius in self._predicted_obs:
+            combined = (radius + obs_radius) ** 2
+            for opos in positions:
+                dx = px - opos[0]
+                dy = py - opos[1]
+                if dx * dx + dy * dy <= combined:
                     return True
-
         return False
 
     def _assess_dynamic_threats(self):
@@ -498,104 +553,56 @@ class Simulator:
             # If both blocked, do nothing this frame — next frame may clear
 
     def _choose_best_direction(self):
-
         if self.robot is None or self.goal is None:
             return np.zeros(2)
 
-        best_score = -1e9
-        best_direction = None
-        best_heading = self.robot.heading
-
-        # Goal direction
-        goal_vector = self.goal - self.robot.pos
-
-        goal_dist = np.linalg.norm(goal_vector)
-
+        robot = self.robot
+        goal_vector = self.goal - robot.pos
+        goal_dist = np.hypot(goal_vector[0], goal_vector[1])
         if goal_dist < 1e-6:
             return np.zeros(2)
-
         goal_direction = goal_vector / goal_dist
 
-        # Candidate steering angles
-        angles = np.linspace(
-            -self.robot.max_turn_rate,
-            self.robot.max_turn_rate,
-            self.robot.candidate_angles
-        )
+        # Precompute lidar ray directions once for the clearance check
+        lidar_dirs = np.array([[np.cos(a), np.sin(a)] for a, _, _ in robot.lidar_data])
+        lidar_dists = np.array([d for _, d, _ in robot.lidar_data])
+
+        angles = np.linspace(-robot.max_turn_rate, robot.max_turn_rate, robot.candidate_angles)
+        best_score = -1e9
+        best_direction = None
+        best_heading = robot.heading
 
         for delta in angles:
+            candidate_heading = robot.heading + delta
+            direction = np.array([np.cos(candidate_heading), np.sin(candidate_heading)])
 
-            candidate_heading = (
-                    self.robot.heading + delta
-            )
-
-            direction = np.array([
-                np.cos(candidate_heading),
-                np.sin(candidate_heading)
-            ])
-
-            simulated_pos = self.robot.pos.copy()
-
+            simulated_pos = robot.pos.copy()
             collision = False
-
-            # Simulate future motion
-            for _ in range(self.robot.prediction_time):
-
-                simulated_pos += (
-                        direction * self.robot.speed
-                )
-
-                if self._trajectory_collision(
-                        simulated_pos,
-                        self.robot.radius
-                ):
+            for _ in range(robot.prediction_time):
+                simulated_pos += direction * robot.speed
+                if self._trajectory_collision(simulated_pos, robot.radius):
                     collision = True
                     break
-
-            # Reject collisions immediately
             if collision:
                 continue
 
-            # -------------------------
-            # SCORE COMPONENTS
-            # -------------------------
-
-            # 1. Goal alignment
-            alignment = np.dot(
-                direction,
-                goal_direction
-            )
-
-            # 2. Goal progress
-            final_goal_dist = np.linalg.norm(
-                self.goal - simulated_pos
-            )
-
-            progress = -final_goal_dist
-
-            # 3. Turning penalty
+            alignment = np.dot(direction, goal_direction)
+            progress = -np.hypot(*(self.goal - simulated_pos))
             smoothness = -abs(delta)
+            continuity = -abs(candidate_heading - robot.heading)
 
-            # 4. Obstacle clearance from lidar
-            clearance = 0.0
-            for angle, dist, _ in self.robot.lidar_data:
-                ray_dir = np.array([np.cos(angle), np.sin(angle)])
-                alignment_to_ray = np.dot(direction, ray_dir)
-                if alignment_to_ray > 0.5:  # ray roughly ahead in this direction
-                    clearance -= (1.0 / max(dist, 1.0)) * alignment_to_ray
+            # Vectorised clearance — no per-ray loop
+            alignments_to_rays = lidar_dirs @ direction
+            mask = alignments_to_rays > 0.5
+            clearance = -np.sum(alignments_to_rays[mask] / np.maximum(lidar_dists[mask], 1.0)) if mask.any() else 0.0
 
-            # Continuity: penalise deviation from current heading
-            continuity = -abs(candidate_heading - self.robot.heading)
-            # -------------------------
-            # FINAL SCORE
-            # -------------------------
             score = (
                     alignment * 200
                     + progress * 1.5
                     + smoothness * 10
-                    + clearance * 300  # penalise directions toward lidar hits
+                    + clearance * 300
                     + continuity * 80
-                    + (500 if self.robot.stuck else 0) * (1 - abs(delta) / self.robot.max_turn_rate) # reward turning when stuck
+                    + (500 if robot.stuck else 0) * (1 - abs(delta) / robot.max_turn_rate)
             )
 
             if score > best_score:
@@ -603,12 +610,10 @@ class Simulator:
                 best_direction = direction
                 best_heading = candidate_heading
 
-        # No safe direction found
         if best_direction is None:
             return np.zeros(2)
 
-        self.robot.heading = best_heading
-
+        robot.heading = best_heading
         return best_direction
 
     def _detect_stuck(self, window=20, threshold=8.0):
@@ -646,7 +651,7 @@ class Simulator:
     def _wall_follow_direction(self):
         robot = self.robot
 
-        # Same approach: use closest lidar hit as the wall normal
+        # Same approach: use the closest lidar hit as the wall normal
         closest = min(robot.lidar_data, key=lambda r: r[1])
         closest_angle, closest_dist, _ = closest
 

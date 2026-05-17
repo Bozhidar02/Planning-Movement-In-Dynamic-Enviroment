@@ -84,6 +84,12 @@ class Simulator:
         if self.robot is None or self.goal is None:
             return
 
+        goal_dist = np.hypot(self.robot.pos[0] - self.goal[0], self.robot.pos[1] - self.goal[1])
+        if(goal_dist <= self.robot.radius):
+            self.robot.stuck = False
+            self.robot.mode = "navigate"
+            self.running = False
+
         self._sense_obstacles()
         self._detect_stuck()
         self._precompute_predictions()

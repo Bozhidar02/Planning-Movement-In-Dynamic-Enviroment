@@ -14,7 +14,21 @@ class Simulator:
         self._cached_grid = None
         self._cached_grid_res = None
         self._predicted_obs = []
-        self._cached_dynamic_grid  = None
+        self._cached_dynamic_grid = None
+        # Visited map: coarse grid, cell size 20px
+        self._visited_map = {}
+        self._visited_cell_size = 20
+
+    def _mark_visited(self):
+        cs = self._visited_cell_size
+        cell = (int(self.robot.pos[0] // cs), int(self.robot.pos[1] // cs))
+        self._visited_map[cell] = self._visited_map.get(cell, 0) + 1
+
+    def _visited_penalty(self, pos):
+        cs = self._visited_cell_size
+        cell = (int(pos[0] // cs), int(pos[1] // cs))
+        count = self._visited_map.get(cell, 0)
+        return -min(count * 8.0, 200.0)  # caps at -200 so it doesn't override everything
 
     def _collides_with_static(self, pos, radius):
         px, py = pos
@@ -84,7 +98,8 @@ class Simulator:
         if self.robot is None or self.goal is None:
             return
 
-        goal_dist = np.hypot(self.robot.pos[0] - self.goal[0], self.robot.pos[1] - self.goal[1])
+        goal_dist = np.hypot(self.robot.pos[0] - self.goal[0],
+                             self.robot.pos[1] - self.goal[1])
         if goal_dist <= self.robot.radius:
             self.robot.stuck = False
             self.robot.mode = "navigate"
@@ -94,9 +109,9 @@ class Simulator:
         self._sense_obstacles()
         self._detect_stuck()
         self._precompute_predictions()
+        self._mark_visited()
 
         robot = self.robot
-        direction = np.zeros(2)
 
         if robot.mode == "navigate":
             if robot.stuck:
@@ -120,12 +135,10 @@ class Simulator:
                     tangent_b = np.array([wall_normal[1], -wall_normal[0]])
 
                     def openness_in_dir(tangent):
-                        total = 0.0
-                        count = 0
-                        for angle, dist, _ in robot.lidar_data:
-                            ray_dir = np.array([np.cos(angle), np.sin(angle)])
-                            if np.dot(ray_dir, tangent) > 0.5:
-                                total += dist
+                        total, count = 0.0, 0
+                        for a, d, _ in robot.lidar_data:
+                            if np.dot(np.array([np.cos(a), np.sin(a)]), tangent) > 0.5:
+                                total += d
                                 count += 1
                         return total / count if count > 0 else 0.0
 
@@ -165,11 +178,13 @@ class Simulator:
             if aligned:
                 robot.mode = "wall_follow"
                 robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
+                robot.wall_follow_entry_pos = robot.pos.copy()
 
         elif robot.mode == "wall_follow":
             robot.wall_follow_steps += 1
 
-            if robot.stuck:
+            # Dead end check — blocked on wall side, ahead, and behind
+            if self._detect_dead_end():
                 robot.wall_follow_dir *= -1
                 robot.wall_follow_steps = 0
                 robot.stuck = False
@@ -177,14 +192,23 @@ class Simulator:
                 robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
                 return
 
-            min_steps = 60
-            can_exit = robot.wall_follow_steps > min_steps
+            if robot.stuck and robot.wall_follow_steps > 15:
+                robot.wall_follow_dir *= -1
+                robot.wall_follow_steps = 0
+                robot.stuck = False
+                robot._pos_history.clear()
+                robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
+                return
 
+            can_exit = robot.wall_follow_steps > 60
             current_goal_dist = np.linalg.norm(self.goal - robot.pos)
             past_entry_point = current_goal_dist < robot.wall_entry_goal_dist
-            wall_has_ended = self._detect_wall_end()
 
-            if can_exit and (wall_has_ended or past_entry_point) and (
+            # Only exit toward a gap if it's actually wide enough to fit through
+            wall_ended = self._detect_wall_end()
+            gap_passable = wall_ended and self._gap_is_passable()
+
+            if can_exit and (gap_passable or past_entry_point) and (
                     self._goal_is_reachable() or
                     robot.wall_follow_steps > robot.max_wall_follow_steps):
                 robot.mode = "navigate"
@@ -212,6 +236,7 @@ class Simulator:
         self._cached_grid = None
         self._cached_grid_res = None
         self._cached_dynamic_grid = None
+        self._visited_map = {}
 
     def _astar_path(self, start, goal, grid, grid_size):
 
@@ -603,7 +628,6 @@ class Simulator:
             return np.zeros(2)
         goal_direction = goal_vector / goal_dist
 
-        # Precompute lidar ray directions once for the clearance check
         lidar_dirs = np.array([[np.cos(a), np.sin(a)] for a, _, _ in robot.lidar_data])
         lidar_dists = np.array([d for _, d, _ in robot.lidar_data])
 
@@ -630,11 +654,14 @@ class Simulator:
             progress = -np.hypot(*(self.goal - simulated_pos))
             smoothness = -abs(delta)
             continuity = -abs(candidate_heading - robot.heading)
+            visited = self._visited_penalty(simulated_pos)
 
-            # Vectorised clearance — no per-ray loop
             alignments_to_rays = lidar_dirs @ direction
             mask = alignments_to_rays > 0.5
-            clearance = -np.sum(alignments_to_rays[mask] / np.maximum(lidar_dists[mask], 1.0)) if mask.any() else 0.0
+            clearance = (
+                -np.sum(alignments_to_rays[mask] / np.maximum(lidar_dists[mask], 1.0))
+                if mask.any() else 0.0
+            )
 
             score = (
                     alignment * 200
@@ -642,6 +669,7 @@ class Simulator:
                     + smoothness * 10
                     + clearance * 300
                     + continuity * 80
+                    + visited  # penalise already-visited cells
                     + (500 if robot.stuck else 0) * (1 - abs(delta) / robot.max_turn_rate)
             )
 
@@ -667,7 +695,24 @@ class Simulator:
             displacement = np.linalg.norm(
                 robot._pos_history[-1] - robot._pos_history[0]
             )
-            robot.stuck = displacement < threshold
+
+            # Also catch oscillation: high heading variance + low displacement
+            if not hasattr(robot, '_heading_history'):
+                robot._heading_history = []
+            robot._heading_history.append(robot.heading)
+            if len(robot._heading_history) > window:
+                robot._heading_history.pop(0)
+
+            if len(robot._heading_history) == window:
+                # Circular variance of heading
+                sin_mean = np.mean([np.sin(h) for h in robot._heading_history])
+                cos_mean = np.mean([np.cos(h) for h in robot._heading_history])
+                heading_consistency = np.hypot(sin_mean, cos_mean)  # 1=steady, 0=chaotic
+                oscillating = heading_consistency < 0.3 and displacement < threshold * 3
+
+                robot.stuck = displacement < threshold or oscillating
+            else:
+                robot.stuck = displacement < threshold
         else:
             robot.stuck = False
 
@@ -691,14 +736,36 @@ class Simulator:
     def _wall_follow_direction(self):
         robot = self.robot
 
-        closest = min(robot.lidar_data, key=lambda r: r[1])
-        closest_angle, closest_dist, _ = closest
+        wall_side_angle = robot.heading + (np.pi / 2) * (-robot.wall_follow_dir)
 
-        if closest_dist >= robot.lidar_range:
-            return np.array([np.cos(robot.heading), np.sin(robot.heading)])
+        wall_hits = []
+        for angle, dist, hit in robot.lidar_data:
+            angular_diff = abs((angle - wall_side_angle + np.pi) % (2 * np.pi) - np.pi)
+            if angular_diff < np.radians(45) and dist < robot.lidar_range * 0.9:
+                wall_hits.append(hit)
 
-        tangent_angle = closest_angle + (np.pi / 2) * robot.wall_follow_dir
-        desired = np.array([np.cos(tangent_angle), np.sin(tangent_angle)])
+        if len(wall_hits) >= 2:
+            pts = np.array(wall_hits)
+            centroid = pts.mean(axis=0)
+            centered = pts - centroid
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            wall_tangent = Vt[0]
+
+            # Orient by the INTENDED follow tangent, not current heading
+            # This is stable even when heading oscillates
+            intended_tangent_angle = wall_side_angle + (np.pi / 2) * robot.wall_follow_dir
+            intended = np.array([np.cos(intended_tangent_angle), np.sin(intended_tangent_angle)])
+            if np.dot(wall_tangent, intended) < 0:
+                wall_tangent = -wall_tangent
+
+            desired = wall_tangent.copy()
+        else:
+            closest = min(robot.lidar_data, key=lambda r: r[1])
+            closest_angle, closest_dist, _ = closest
+            if closest_dist >= robot.lidar_range:
+                return np.array([np.cos(robot.heading), np.sin(robot.heading)])
+            tangent_angle = closest_angle + (np.pi / 2) * robot.wall_follow_dir
+            desired = np.array([np.cos(tangent_angle), np.sin(tangent_angle)])
 
         if robot.wall_follow_steps > 60:
             goal_dir = self.goal - robot.pos
@@ -706,10 +773,44 @@ class Simulator:
             if goal_dist > 1e-6:
                 goal_dir /= goal_dist
             extra_steps = robot.wall_follow_steps - 60
-            goal_pull = min(extra_steps / 120.0, 0.6)
+            goal_pull = min(extra_steps / 120.0, 0.4)
             desired = desired * (1 - goal_pull) + goal_dir * goal_pull
             desired /= np.linalg.norm(desired)
 
+        ahead_cone = np.radians(25)
+        wall_side_angle = robot.heading + (np.pi / 2) * (-robot.wall_follow_dir)
+
+        fwd_dists, side_dists = [], []
+        for angle, dist, _ in robot.lidar_data:
+            fwd_diff = abs((angle - robot.heading + np.pi) % (2 * np.pi) - np.pi)
+            side_diff = abs((angle - wall_side_angle + np.pi) % (2 * np.pi) - np.pi)
+            if fwd_diff < ahead_cone:
+                fwd_dists.append(dist)
+            if side_diff < np.radians(30):
+                side_dists.append(dist)
+
+        if fwd_dists and side_dists:
+            fwd_clear = min(fwd_dists)  # worst-case ahead
+            side_clear = np.mean(side_dists)  # average wall distance
+
+            # Ridge criterion: something is blocking the path ahead while
+            # the wall is still present beside us (not a corner/gap).
+            ridge_threshold = robot.radius * 3.5
+            wall_still_present = side_clear < robot.lidar_range * 0.7
+
+            if fwd_clear < ridge_threshold and wall_still_present:
+                # Step away from wall: blend in an outward component
+                outward = np.array([np.cos(wall_side_angle + np.pi),
+                                    np.sin(wall_side_angle + np.pi)])
+                # Scale step strength by how blocked we are
+                step_strength = 1.0 - (fwd_clear / ridge_threshold)  # 0–1
+                desired = desired * (1 - step_strength * 0.6) + outward * (step_strength * 0.6)
+                mag = np.linalg.norm(desired)
+                if mag > 1e-6:
+                    desired /= mag
+        # ── END RIDGE DETECTION ──────────────────────────────────────────────────
+
+        # (rest of existing heading update is unchanged)
         desired_heading = np.arctan2(desired[1], desired[0])
         heading_error = (desired_heading - robot.heading + np.pi) % (2 * np.pi) - np.pi
         robot.heading += np.clip(heading_error, -robot.max_turn_rate * 5, robot.max_turn_rate * 5)
@@ -745,9 +846,7 @@ class Simulator:
             return False
 
         wall_side_angle = robot.heading + (np.pi / 2) * (-robot.wall_follow_dir)
-
-        open_rays = 0
-        checked_rays = 0
+        open_rays, checked_rays = 0, 0
 
         for angle, dist, _ in robot.lidar_data:
             angular_diff = abs((angle - wall_side_angle + np.pi) % (2 * np.pi) - np.pi)
@@ -758,5 +857,59 @@ class Simulator:
 
         if checked_rays == 0:
             return False
-
         return (open_rays / checked_rays) > 0.6
+
+    def _gap_is_passable(self):
+        """
+        Measures the physical width of the open space on the wall side.
+        Returns True only if the gap is wide enough for the robot to pass.
+        """
+        robot = self.robot
+        wall_side_angle = robot.heading + (np.pi / 2) * (-robot.wall_follow_dir)
+        min_gap = robot.radius * 2.5
+
+        # Collect open rays in the wall-side cone
+        open_ray_angles = []
+        gap_dists = []
+        for angle, dist, _ in robot.lidar_data:
+            angular_diff = abs((angle - wall_side_angle + np.pi) % (2 * np.pi) - np.pi)
+            if angular_diff < np.radians(40) and dist >= robot.lidar_range * 0.85:
+                open_ray_angles.append(angle)
+                gap_dists.append(dist)
+
+        if not open_ray_angles:
+            return False
+
+        # Angular span of the opening × distance = approximate physical width
+        span = max(open_ray_angles) - min(open_ray_angles)
+        avg_dist = np.mean(gap_dists)
+        physical_width = avg_dist * np.tan(span / 2) * 2
+
+        return physical_width >= min_gap
+
+    def _detect_dead_end(self):
+        """
+        Returns True when the robot is boxed in on three sides —
+        ahead, wall side, and behind — indicating a dead end pocket.
+        """
+        robot = self.robot
+        if not robot.lidar_data:
+            return False
+
+        close_thresh = robot.radius * 4
+
+        def avg_dist_in_cone(center_angle, half_width):
+            dists = []
+            for angle, dist, _ in robot.lidar_data:
+                diff = abs((angle - center_angle + np.pi) % (2 * np.pi) - np.pi)
+                if diff < half_width:
+                    dists.append(dist)
+            return np.mean(dists) if dists else robot.lidar_range
+
+        ahead_dist = avg_dist_in_cone(robot.heading, np.radians(30))
+        wall_side = robot.heading + (np.pi / 2) * (-robot.wall_follow_dir)
+        side_dist = avg_dist_in_cone(wall_side, np.radians(30))
+        behind_dist = avg_dist_in_cone(robot.heading + np.pi, np.radians(30))
+
+        return ahead_dist < close_thresh and side_dist < close_thresh
+

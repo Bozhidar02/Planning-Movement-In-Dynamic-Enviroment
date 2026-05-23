@@ -2,9 +2,7 @@ import pygame
 import numpy as np
 import core.enviroment
 import core.simulator
-import entities.robot
 import ui.renderer
-import entities.obstacles
 import ui.input_handler
 
 WIDTH, HEIGHT = 900, 650
@@ -28,11 +26,26 @@ def main():
             if event.type == pygame.QUIT:
                 running_app = False
 
-            # Toolbar mode switching via mouse click
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                pos = event.pos
+
+                # Mode buttons
                 for mode, rect in renderer._btn_rects.items():
-                    if rect.collidepoint(event.pos):
+                    if rect.collidepoint(pos):
                         sim.mode = mode
+                        break
+
+                # Control buttons
+                for action, rect in renderer._ctrl_rects.items():
+                    if rect.collidepoint(pos):
+                        if action == "start":
+                            sim.running = True
+                        elif action == "reset":
+                            sim.reset()
+                        elif action == "clear":
+                            sim.env.static_obstacles.clear()
+                            sim._cached_grid = None
+                            sim._cached_dynamic_grid = None
                         break
 
             input_handler.handle_event(event)

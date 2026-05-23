@@ -85,10 +85,11 @@ class Simulator:
             return
 
         goal_dist = np.hypot(self.robot.pos[0] - self.goal[0], self.robot.pos[1] - self.goal[1])
-        if(goal_dist <= self.robot.radius):
+        if goal_dist <= self.robot.radius:
             self.robot.stuck = False
             self.robot.mode = "navigate"
             self.running = False
+            return
 
         self._sense_obstacles()
         self._detect_stuck()
@@ -104,41 +105,53 @@ class Simulator:
                 robot.stuck = False
                 robot._pos_history.clear()
 
-                # Pick wall follow direction toward goal
                 goal_dir = self.goal - robot.pos
                 goal_dir /= max(np.linalg.norm(goal_dir), 1e-6)
+
                 wall_normal = np.zeros(2)
                 for angle, dist, _ in robot.lidar_data:
                     if dist < 80:
                         ray_dir = np.array([np.cos(angle), np.sin(angle)])
                         wall_normal -= ray_dir * ((80 - dist) / 80)
+
                 if np.linalg.norm(wall_normal) > 1e-6:
                     wall_normal /= np.linalg.norm(wall_normal)
                     tangent_a = np.array([-wall_normal[1], wall_normal[0]])
                     tangent_b = np.array([wall_normal[1], -wall_normal[0]])
-                    robot.wall_follow_dir = 1 if np.dot(tangent_a, goal_dir) >= np.dot(tangent_b, goal_dir) else -1
+
+                    def openness_in_dir(tangent):
+                        total = 0.0
+                        count = 0
+                        for angle, dist, _ in robot.lidar_data:
+                            ray_dir = np.array([np.cos(angle), np.sin(angle)])
+                            if np.dot(ray_dir, tangent) > 0.5:
+                                total += dist
+                                count += 1
+                        return total / count if count > 0 else 0.0
+
+                    open_a = openness_in_dir(tangent_a)
+                    open_b = openness_in_dir(tangent_b)
+                    score_a = np.dot(tangent_a, goal_dir) * 0.5 + (open_a / robot.lidar_range) * 0.5
+                    score_b = np.dot(tangent_b, goal_dir) * 0.5 + (open_b / robot.lidar_range) * 0.5
+                    robot.wall_follow_dir = 1 if score_a >= score_b else -1
                 else:
                     robot.wall_follow_dir = 1
 
             wait, back_up, backup_direction = self._assess_dynamic_threats()
 
             if back_up or wait:
-                # Increment stall counter
                 robot.dynamic_wait_steps = getattr(robot, 'dynamic_wait_steps', 0) + 1
-
-                if robot.dynamic_wait_steps > 60:  # ~1 second at 60fps — tune this
+                if robot.dynamic_wait_steps > 60:
                     self._circle_back()
                     return
-
                 if back_up:
                     backup_direction /= np.linalg.norm(backup_direction)
                     proposed = robot.pos + backup_direction * robot.speed
                     if not self._trajectory_collision(proposed, robot.radius):
                         robot.pos = proposed
-                return  # wait: stand still
-
+                return
             else:
-                robot.dynamic_wait_steps = 0  # clear counter when path is free
+                robot.dynamic_wait_steps = 0
 
             direction = self._choose_best_direction()
             if np.linalg.norm(direction) < 1e-6:
@@ -151,13 +164,13 @@ class Simulator:
             aligned = self._align_to_wall()
             if aligned:
                 robot.mode = "wall_follow"
+                robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
 
         elif robot.mode == "wall_follow":
             robot.wall_follow_steps += 1
 
-            # Stuck detection during wall follow
             if robot.stuck:
-                robot.wall_follow_dir *= -1  # try the other side
+                robot.wall_follow_dir *= -1
                 robot.wall_follow_steps = 0
                 robot.stuck = False
                 robot._pos_history.clear()
@@ -167,13 +180,16 @@ class Simulator:
             min_steps = 60
             can_exit = robot.wall_follow_steps > min_steps
 
-            robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
             current_goal_dist = np.linalg.norm(self.goal - robot.pos)
             past_entry_point = current_goal_dist < robot.wall_entry_goal_dist
+            wall_has_ended = self._detect_wall_end()
 
-            if can_exit and past_entry_point and (self._goal_is_reachable() or
-                                                  robot.wall_follow_steps > robot.max_wall_follow_steps):
+            if can_exit and (wall_has_ended or past_entry_point) and (
+                    self._goal_is_reachable() or
+                    robot.wall_follow_steps > robot.max_wall_follow_steps):
                 robot.mode = "navigate"
+                robot._pos_history.clear()
+                return
 
             direction = self._wall_follow_direction()
             if np.linalg.norm(direction) < 1e-6:
@@ -675,7 +691,6 @@ class Simulator:
     def _wall_follow_direction(self):
         robot = self.robot
 
-        # Same approach: use the closest lidar hit as the wall normal
         closest = min(robot.lidar_data, key=lambda r: r[1])
         closest_angle, closest_dist, _ = closest
 
@@ -685,7 +700,6 @@ class Simulator:
         tangent_angle = closest_angle + (np.pi / 2) * robot.wall_follow_dir
         desired = np.array([np.cos(tangent_angle), np.sin(tangent_angle)])
 
-        # Goal pull after min steps (keep your existing logic)
         if robot.wall_follow_steps > 60:
             goal_dir = self.goal - robot.pos
             goal_dist = np.linalg.norm(goal_dir)
@@ -705,19 +719,17 @@ class Simulator:
     def _align_to_wall(self):
         robot = self.robot
 
-        # Average the 5 closest hits for a stable wall normal
         sorted_hits = sorted(robot.lidar_data, key=lambda r: r[1])
         close_hits = [h for h in sorted_hits[:5] if h[1] < robot.lidar_range]
 
         if not close_hits:
             return True
 
-        # Average the ray angles weighted by proximity
-        tangent_angles = []
-        for angle, dist, _ in close_hits:
-            tangent_angles.append(angle + (np.pi / 2) * robot.wall_follow_dir)
+        tangent_angles = [
+            angle + (np.pi / 2) * robot.wall_follow_dir
+            for angle, dist, _ in close_hits
+        ]
 
-        # Circular mean to avoid angle wrapping issues
         sin_mean = np.mean([np.sin(a) for a in tangent_angles])
         cos_mean = np.mean([np.cos(a) for a in tangent_angles])
         tangent_angle = np.arctan2(sin_mean, cos_mean)
@@ -726,3 +738,25 @@ class Simulator:
         robot.heading += np.clip(heading_error, -robot.max_turn_rate * 4, robot.max_turn_rate * 4)
 
         return abs(heading_error) < np.radians(5)
+
+    def _detect_wall_end(self):
+        robot = self.robot
+        if not robot.lidar_data:
+            return False
+
+        wall_side_angle = robot.heading + (np.pi / 2) * (-robot.wall_follow_dir)
+
+        open_rays = 0
+        checked_rays = 0
+
+        for angle, dist, _ in robot.lidar_data:
+            angular_diff = abs((angle - wall_side_angle + np.pi) % (2 * np.pi) - np.pi)
+            if angular_diff < np.radians(30):
+                checked_rays += 1
+                if dist >= robot.lidar_range * 0.85:
+                    open_rays += 1
+
+        if checked_rays == 0:
+            return False
+
+        return (open_rays / checked_rays) > 0.6

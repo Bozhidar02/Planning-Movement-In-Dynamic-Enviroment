@@ -100,10 +100,25 @@ class Simulator:
         if robot.mode == "navigate":
             if robot.stuck:
                 robot.mode = "wall_align"
-                robot.wall_follow_dir = 1
                 robot.wall_follow_steps = 0
                 robot.stuck = False
                 robot._pos_history.clear()
+
+                # Pick wall follow direction toward goal
+                goal_dir = self.goal - robot.pos
+                goal_dir /= max(np.linalg.norm(goal_dir), 1e-6)
+                wall_normal = np.zeros(2)
+                for angle, dist, _ in robot.lidar_data:
+                    if dist < 80:
+                        ray_dir = np.array([np.cos(angle), np.sin(angle)])
+                        wall_normal -= ray_dir * ((80 - dist) / 80)
+                if np.linalg.norm(wall_normal) > 1e-6:
+                    wall_normal /= np.linalg.norm(wall_normal)
+                    tangent_a = np.array([-wall_normal[1], wall_normal[0]])
+                    tangent_b = np.array([wall_normal[1], -wall_normal[0]])
+                    robot.wall_follow_dir = 1 if np.dot(tangent_a, goal_dir) >= np.dot(tangent_b, goal_dir) else -1
+                else:
+                    robot.wall_follow_dir = 1
 
             wait, back_up, backup_direction = self._assess_dynamic_threats()
 
@@ -146,16 +161,19 @@ class Simulator:
                 robot.wall_follow_steps = 0
                 robot.stuck = False
                 robot._pos_history.clear()
+                robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
                 return
 
             min_steps = 60
             can_exit = robot.wall_follow_steps > min_steps
 
-            if can_exit and (self._goal_is_reachable() or
-                             robot.wall_follow_steps > robot.max_wall_follow_steps):
+            robot.wall_entry_goal_dist = np.linalg.norm(self.goal - robot.pos)
+            current_goal_dist = np.linalg.norm(self.goal - robot.pos)
+            past_entry_point = current_goal_dist < robot.wall_entry_goal_dist
+
+            if can_exit and past_entry_point and (self._goal_is_reachable() or
+                                                  robot.wall_follow_steps > robot.max_wall_follow_steps):
                 robot.mode = "navigate"
-                robot._pos_history.clear()
-                return
 
             direction = self._wall_follow_direction()
             if np.linalg.norm(direction) < 1e-6:
